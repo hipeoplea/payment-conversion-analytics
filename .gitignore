@@ -1,7 +1,14 @@
+.venv/
 __pycache__/
 .pytest_cache/
-.venv/
-*.pyc
+.ruff_cache/
+*.py[cod]
 .DS_Store
 data/*.csv
 !data/.gitkeep
+*.egg-info/
+build/
+dist/
+.idea/
+.coverage
+htmlcov/

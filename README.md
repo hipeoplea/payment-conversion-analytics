@@ -1,87 +1,113 @@
-# Payment Conversion Analytics
+# Конверсия онлайн-платежей
 
-**Portfolio case for product analytics in payment processing.** All payment attempts are **synthetic**, generated deterministically. This project does not use real customers, banking records or proprietary LAVA data.
+Портфолио-кейс продуктового аналитика для LAVA. На синтетических данных платёжного сервиса я разбираю, где заказы теряются в воронке оплаты, сколько заказов оплачивается после повтора, как заметить сбой провайдера и какой эффект могло бы дать переключение трафика.
 
-## Business problem
+[Полный аналитический отчёт](reports/analysis.md)
 
-Which segments have low payment authorization success, when do technical failures spike, and how much requested payment volume is affected? The demo intentionally injects a six-day degradation for provider `beta`; finding it is a sanity check, **not** a real-world discovery.
+**Стек** · Python, pandas, NumPy, PostgreSQL, Plotly, Streamlit, pytest.
 
-## Stack
+## Что показала симуляция
 
-Python, pandas, NumPy, PostgreSQL SQL, Plotly, Streamlit, pytest.
+- Из **40 000** созданных заказов к оплате перешли **38 397**. Успешно оплачено **36 033** заказа, конверсия составила **90,08%**.
+- **2 850** заказов оплачено после повтора. Это **94,00%** среди **3 032** заказов, по которым была хотя бы одна повторная попытка.
+- В заданном сценарии сбоя доля технических отказов у **beta** выросла с **3,14%** до **26,87%**. У **alpha** за те же окна показатель изменился с **2,49%** до **2,25%**.
+- Относительное изменение успешности beta к alpha в окно сбоя составило **−22,00 п. п.** (95% ДИ [−25,51; −18,49]). С поправкой на метод оплаты, устройство и сумму заказа оценка составила **−21,99 п. п.**
+- Базовый сценарий восстановления среди заказов, начавших оплату через beta, даёт около **127 дополнительных оплат**, **237,7 тыс. ₽ GMV** и **4,1 тыс. ₽ комиссий**. Пилот с переключением 25% подходящего трафика даёт сценарный ориентир в **32 оплаты** и **1 016 ₽ комиссий** за сопоставимые шесть дней.
 
-## Quick start
+Расчёты сделаны на выборке с `seed=42`.
 
-Requires Python 3.10+.
+## Запуск
+
+Из корня проекта с Python 3.10 или новее:
 
 ```bash
-git clone https://github.com/hipeoplea/payment-conversion-analytics.git
-cd payment-conversion-analytics
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-python -m src.generate_data --rows 100000 --seed 42
-python -m pytest -q
-streamlit run app.py
+python -m pip install -e '.[dev]'
+python -m src.analytics.research
+python -m streamlit run app.py
 ```
 
-On Windows, activate with `.venv\Scripts\activate`.
+В Windows PowerShell для активации окружения используйте `.\.venv\Scripts\Activate.ps1`.
 
-You can start the Streamlit app without generating the CSV; it will create an identical deterministic in-memory sample. The CSV is intentionally gitignored.
+Дашборд загружает `data/orders.csv` и `data/payment_attempts.csv`. Если обе таблицы отсутствуют, он генерирует данные в памяти. При наличии только одной таблицы приложение сообщает, какой файл отсутствует. Чтобы создать CSV для работы с SQL, запустите генератор. Команда перезапишет оба CSV в указанном каталоге.
 
-## Data dictionary
+```bash
+python -m src.data.generator --orders 40000 --seed 42 --output-dir data
+```
 
-One row = **one payment attempt**, not necessarily a unique order or customer.
+## Что посмотреть в дашборде
 
-| Column | Meaning |
+- **Обзор продукта** — главные выводы по инциденту, базовый денежный сценарий и оценка пилота. Здесь же можно скачать отчёт и посмотреть воронку, оборот и динамику.
+- **Диагностика платежей** — успешность попыток, причины отказов, разрезы по провайдеру, методу, устройству и номеру попытки.
+- **Анализ инцидента** — дневная динамика, сравнение трёх окон, 95%-е интервалы и тесты.
+- **Рекомендации** — сценарии восстановления и переключения на alpha с оценкой дополнительных оплат, GMV и комиссий.
+
+Фильтры провайдера, способа оплаты и устройства действуют на раздел диагностики. Обзор, сравнение провайдеров в инциденте и сценарии используют полные когорты.
+
+## Данные и знаменатели
+
+| Таблица | Одна строка | Основные поля |
+| --- | --- | --- |
+| `orders` | Созданный заказ | `order_id`, время, клиент, мерчант, устройство, сумма |
+| `payment_attempts` | Попытка оплаты | `attempt_id`, `order_id`, номер и время попытки, провайдер, метод, статус, причина отказа, комиссия |
+
+Заказ может остаться без попытки. Нумерация попыток начинается с 1, и после успешной оплаты новых попыток по этому заказу нет. У повторной попытки могут быть другой способ оплаты и другой провайдер. В анализе день определяется по времени попытки в UTC. Для заказов генератор выбирает даты с 1 сентября до 31 октября 2026 года, исключая правую границу. Последние попытки могут выйти за границу периода создания заказов.
+
+| Метрика | Расчёт |
 | --- | --- |
-| attempt_id | Unique attempt identifier |
-| created_at | Attempt timestamp |
-| merchant_id / customer_id | Synthetic merchant/customer IDs |
-| provider | Payment processing provider (alpha/beta) |
-| payment_method | card, sbp, wallet |
-| device | mobile, desktop |
-| amount_rub | Requested RUB amount |
-| status | succeeded or failed |
-| failure_reason | Reason on failed attempts only |
-| fee_rub | Simulated fee earned only on success |
+| Конверсия заказов | Успешно оплаченные заказы / все созданные заказы |
+| Успешность попыток | Успешные попытки / все попытки |
+| Успешность повторов | Заказы, оплаченные после повтора / заказы с хотя бы одной повторной попыткой |
+| Доля технических отказов | Попытки с причиной `technical_error` / все попытки в соответствующем сегменте |
+| GMV | Сумма оплаченных заказов, каждый заказ учтён один раз |
+| Комиссионная выручка | Сумма модельных комиссий по успешным попыткам |
 
-No checkout sessions, orders, processor cost, refunds or retry links are currently modeled. Hence **checkout conversion, net revenue, true lost sales and recoverable GMV cannot be inferred** from this dataset.
+## Методология
 
-## Metric definitions
+1. Сравниваю три шестидневных окна по времени попытки и считаю разницу изменений beta и alpha. Использую линейную модель вероятности с кластерными стандартными ошибками по заказам. Отдельно проверяю плацебо до сбоя, поправку на метод оплаты, устройство и сумму, а также выборку первых попыток.
+2. Для денежной оценки беру заказы, начавшие оплату через beta во время сбоя. Сопоставляю их с заказами с таким же способом первой оплаты и устройством. Ориентир рассчитываю по итоговой конверсии когорты, учитывая повторные попытки через любой провайдер.
+3. Взвешиваю только фактически неоплаченные заказы. Три сценария используют разные ориентиры конверсии. Для пилота моделирую переключение 25%, 50% и 75% подходящего трафика на alpha.
 
-- **Payment success rate** = succeeded attempts / all attempts.
-- **GMV** = sum of requested amounts **only for succeeded attempts**.
-- **Fee revenue** = sum of simulated fees on succeeded attempts; this is *gross fee revenue*, not profit.
-- **Failed requested amount** = requested volume associated with failed attempts; **not** lost revenue or recoverable GMV.
-- **Technical-failure-at-risk amount** = requested volume for attempts whose failure reason is `technical_error`; no assumption of full recoverability.
+## Рекомендации
 
-See `sql/analysis.sql` for PostgreSQL-compatible analytical queries and DDL.
+Поставить отдельный мониторинг технических отказов beta и начать проверку аварийного переключения с 25% подходящего трафика. В пилоте измерять итоговую конверсию заказов, валовые комиссии и время ответа alpha. Для 1 603 заказов без попытки проверить, на каком шаге чекаута клиенты уходят.
 
-### PostgreSQL import (optional)
+## Проверка в PostgreSQL
 
-Create the table by running the DDL in `sql/analysis.sql`, then use `psql`:
+Создайте пустую базу. Выполните команды в `psql` из корня проекта после генерации обоих CSV.
 
 ```sql
-\copy payment_attempts(attempt_id,created_at,merchant_id,customer_id,provider,payment_method,device,amount_rub,status,failure_reason,fee_rub) FROM 'data/payment_attempts.csv' CSV HEADER NULL ''
+\set ON_ERROR_STOP on
+\i sql/schema.sql
+\copy orders FROM 'data/orders.csv' WITH (FORMAT csv, HEADER true)
+\copy payment_attempts FROM 'data/payment_attempts.csv' WITH (FORMAT csv, HEADER true)
+\i sql/analysis.sql
 ```
 
-Then execute the SELECT statements from `sql/analysis.sql`. Run from the repository root in `psql` (not a generic SQL GUI, where `\copy` is unsupported).
+Запросы возвращают воронку и денежные метрики, общие показатели попыток, разрезы по провайдерам, методам и устройствам, дневную динамику и три окна вокруг заданного сбоя. Статистические тесты и денежные сценарии выполняются командой `python -m src.analytics.research`.
 
-## Synthetic data design
+## Проверки кода
 
-The generator uses NumPy RNG with default seed 42 and produces 100,000 payment attempts across 80 merchants and 20,000 potential customer IDs, over Sep–Oct 2026. It uses arbitrary but documented baseline failure probabilities, with differences by method and mobile device. Additional technical failures are **deliberately injected** for provider `beta` from Oct 12 inclusive to Oct 18 exclusive. These parameters are illustrative, not calibrated estimates of any provider's actual performance.
+```bash
+python -m pytest -q -W error
+python -m ruff check .
+python -m ruff format --check .
+```
 
-The project is a **diagnostic analytics demo**, not a validated forecast or causal A/B experiment. An A/B test would require actual randomized assignment, treatment/control identifiers and predeclared hypotheses; these are not yet part of the dataset.
+[Workflow GitHub Actions](.github/workflows/checks.yml) задаёт эти проверки для Python 3.10 и 3.12 при отправке изменений в репозиторий и открытии pull request.
 
-## Next improvements
+## Структура проекта
 
-1. Model checkout sessions, orders, retry attempts and deduplicate outcomes to estimate **checkout-to-paid conversion**.
-2. Analyze incident impact with matched control segments and uncertainty intervals.
-3. Add a properly randomized synthetic A/B experiment with statistical power and guardrails.
-4. Build concise business recommendations with clearly marked assumptions.
-5. Add CI and dashboard screenshots once validated.
+| Путь | Назначение |
+| --- | --- |
+| `src/data/` | Генерация, загрузка CSV и проверки качества данных |
+| `src/analytics/` | Метрики, кластерные интервалы, DiD и денежные сценарии |
+| `src/dashboard/charts.py`, `app.py` | Графики Plotly и интерфейс Streamlit |
+| `sql/` | Схема PostgreSQL и аналитические запросы |
+| `tests/` | Контрольные примеры, проверка загрузки и поведения дашборда |
+| `reports/analysis.md` | Результаты и их интерпретация |
 
-## Integrity
+## Ограничения
 
-No real merchant data is included. A failed transaction may be retried later; summing failed amounts overstates actual lost GMV. Treat all monetary outputs as hypothetical.
+Все данные синтетические. Параметры симулятора задают различия между способами оплаты и рост отказов у beta с 12 по 17 октября. Анализ демонстрирует диагностику этого сценария. Интервалы учитывают зависимость попыток внутри заказа. Для причинной оценки эффекта в реальном сервисе нужен эксперимент или обоснованный дизайн сравнения. Сценарии предполагают сопоставимость заказов и сохранение нормальной работы alpha при дополнительной нагрузке. Сумма заказов с отказом сама по себе не оценивает потери выручки.
